@@ -54,56 +54,13 @@ class OpenAIToolParser(ToolParser):
             "assistant": self._encode_single_token("assistant"),
         }
 
-    # All "final"-related tokens found via embedding similarity analysis.
-    # These tokens are close to "final" in the model's embedding space and
-    # could potentially be generated instead of the exact "final" token
-    # after <|channel|>.
-    _FINAL_VARIANTS: list[str] = [
-        # Exact and case variants
-        "final",
-        " final",
-        "Final",
-        " Final",
-        "FINAL",
-        " FINAL",
-        # Prefix-attached variants
-        "_final",
-        "_Final",
-        "_FINAL",
-        ".final",
-        ".Final",
-        "(final",
-        "-final",
-        # Indented variant
-        "    final",
-        # Derived words that start with "final"
-        "finally",
-        " finally",
-        "finalize",
-        "Finalize",
-        " finalize",
-        " finalized",
-        " finale",
-        " Finale",
-        " finals",
-        " Finals",
-        " finalist",
-        " finalists",
-        " finais",
-        # Partial match
-        "INAL",
-        # Non-English variants
-        " finalement",
-        " finalizar",
-        " finalidade",
-    ]
-
     def _get_channel_token_ids(self) -> dict[str, int | None]:
-        """Get token IDs for all final channel variants."""
-        result: dict[str, int | None] = {}
-        for variant in self._FINAL_VARIANTS:
-            result[variant] = self._encode_single_token(variant)
-        return result
+        """Get channel name token IDs for final channel variants."""
+        return {
+            "final": self._encode_single_token("final"),
+            " final": self._encode_single_token(" final"),
+            "finally": self._encode_single_token("finally"),
+        }
 
     def _encode_single_token(self, text: str) -> int | None:
         """Encode text and return token ID if it's a single token."""
@@ -125,11 +82,11 @@ class OpenAIToolParser(ToolParser):
         """
         Build bad_words token sequences to block the final channel.
 
-        Two layers of defense:
-        1. Block all "final"-related token variants after <|channel|> prefix
-           (prevents entering the final channel)
-        2. Block <|return|> globally as a safety net
-           (prevents completing a text response even if final channel is entered)
+        Blocks these sequences to prevent direct text responses:
+        - <|end|><|start|>assistant<|channel|>final
+        - <|end|><|start|>assistant<|channel|> final  (leading space variant)
+        - <|end|><|start|>assistant<|channel|>finally  (tokenizer edge case)
+        - <|return|>  (global block — prevents completing any text response)
 
         Analysis and commentary channels remain unblocked, allowing the model
         to reason freely and generate preambles before tool calls.
@@ -140,7 +97,6 @@ class OpenAIToolParser(ToolParser):
         start_id = self._harmony_token_ids.get("start")
         assistant_id = self._harmony_token_ids.get("assistant")
         channel_id = self._harmony_token_ids.get("channel")
-        return_id = self._harmony_token_ids.get("return")
 
         # Validate required tokens exist
         if (
@@ -155,27 +111,23 @@ class OpenAIToolParser(ToolParser):
             )
             return []
 
-        # Layer 1: Block final channel variants after prefix
-        # <|end|><|start|>assistant<|channel|> + final variant
+        # Common prefix: <|end|><|start|>assistant<|channel|>
         prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
-        for variant, token_id in self._channel_token_ids.items():
-            if isinstance(token_id, int):
-                seq = prefix + [token_id]
-                bad_sequences.append(seq)
-                logger.debug("Blocking '%s' (id=%d): %s", variant, token_id, seq)
 
-        # Layer 2: Block <|return|> globally (safety net)
-        # <|return|> is a special token with no variants, so this is robust.
-        # If the model somehow enters the final channel despite Layer 1,
-        # it cannot emit <|return|> to complete the response.
+        # Block final channel variants
+        for channel_key in ["final", " final", "finally"]:
+            channel_token = self._channel_token_ids.get(channel_key)
+            if isinstance(channel_token, int):
+                seq = prefix + [channel_token]
+                bad_sequences.append(seq)
+                logger.debug("Blocking %s token: %s", channel_key, seq)
+
+        # Block <|return|> globally as safety net.
+        # This is a special token with no variants, so no edge cases.
+        return_id = self._harmony_token_ids.get("return")
         if return_id is not None:
             bad_sequences.append([return_id])
             logger.debug("Blocking <|return|> globally (id=%d)", return_id)
-
-        logger.info(
-            "Built %d bad_words sequences for tool_choice=required",
-            len(bad_sequences),
-        )
 
         return bad_sequences
 
