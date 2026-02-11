@@ -84,13 +84,13 @@ class OpenAIToolParser(ToolParser):
         """
         Build bad_words token sequences to block non-tool-call paths.
 
-        Blocks:
-        - <|end|><|start|>assistant<|channel|>final (direct final response)
-        - <|end|><|start|>assistant<|channel|>analysis (new analysis message)
-        - commentary<|message|> (commentary without recipient = not a tool call)
+        Blocks these sequences (all share the same prefix pattern):
+        - <|end|><|start|>assistant<|channel|>final
+        - <|end|><|start|>assistant<|channel|>analysis
+        - <|end|><|start|>assistant<|channel|>commentary<|message|>
+          (commentary without recipient = preamble only, not a tool call)
 
-        This allows first message to use analysis channel for reasoning,
-        but forces subsequent messages to use commentary with recipient (tool call).
+        This forces the model to use commentary channel with recipient (tool call).
         """
         bad_sequences: list[list[int]] = []
 
@@ -113,21 +113,21 @@ class OpenAIToolParser(ToolParser):
             )
             return []
 
-        # Common prefix for new assistant message (all validated as int above)
-        new_msg_prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
+        # Common prefix: <|end|><|start|>assistant<|channel|>
+        prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
 
-        # Block transitions to final/analysis channels
+        # Block final/analysis channels
         for channel_key in ["final", "analysis", " final", " analysis"]:
             channel_token = self._channel_token_ids.get(channel_key)
             if isinstance(channel_token, int):
-                seq = new_msg_prefix + [channel_token]
+                seq = prefix + [channel_token]
                 bad_sequences.append(seq)
-                logger.debug("Blocking new message to %s channel: %s", channel_key, seq)
+                logger.debug("Blocking %s channel: %s", channel_key, seq)
 
-        # Block commentary without recipient (not a tool call)
+        # Block commentary without recipient (preamble only, not a tool call)
         commentary_tokens = self._channel_token_ids.get("commentary")
         if isinstance(commentary_tokens, list) and message_id is not None:
-            seq = commentary_tokens + [message_id]
+            seq = prefix + commentary_tokens + [message_id]
             bad_sequences.append(seq)
             logger.debug("Blocking commentary without recipient: %s", seq)
 
