@@ -357,3 +357,57 @@ async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI)
     assert low_mid_sim > 60, (
         f"Semantic drift too large between T=0.0 and T=0.5 ({low_mid_sim}%)"
     )
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_required_forces_tool_call(client: openai.AsyncOpenAI):
+    """
+    Verify that tool_choice='required' forces the model to generate tool calls.
+
+    When tool_choice is set to 'required', the model should always produce
+    tool calls instead of plain text responses.
+    """
+    # Use a message that could be answered with plain text
+    messages = [{"role": "user", "content": "Hello, how are you today?"}]
+
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="required",
+        temperature=0.0,
+        stream=False,
+    )
+
+    message = response.choices[0].message
+    tool_calls = getattr(message, "tool_calls", [])
+
+    # With tool_choice="required", should always have tool calls
+    assert tool_calls, (
+        "tool_choice='required' should force tool call generation, "
+        f"but got no tool calls. Content: {message.content}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_required_streaming(client: openai.AsyncOpenAI):
+    """Verify tool_choice='required' works correctly in streaming mode."""
+    messages = [{"role": "user", "content": "Say hello to me."}]
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="required",
+        temperature=0.0,
+        stream=True,
+    )
+
+    chunks = [chunk async for chunk in stream]
+    _, arguments, function_names = extract_reasoning_and_calls(chunks)
+
+    # With tool_choice="required", should have at least one tool call
+    assert function_names, (
+        "tool_choice='required' should force tool call in streaming mode, "
+        "but got no function names"
+    )
