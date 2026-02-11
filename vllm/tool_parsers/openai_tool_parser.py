@@ -34,7 +34,6 @@ class OpenAIToolParser(ToolParser):
     HARMONY_END_TOKEN = "<|end|>"
     HARMONY_START_TOKEN = "<|start|>"
     HARMONY_CHANNEL_TOKEN = "<|channel|>"
-    HARMONY_MESSAGE_TOKEN = "<|message|>"
 
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
@@ -50,18 +49,15 @@ class OpenAIToolParser(ToolParser):
             "end": vocab.get(self.HARMONY_END_TOKEN),
             "start": vocab.get(self.HARMONY_START_TOKEN),
             "channel": vocab.get(self.HARMONY_CHANNEL_TOKEN),
-            "message": vocab.get(self.HARMONY_MESSAGE_TOKEN),
             "assistant": self._encode_single_token("assistant"),
         }
 
     def _get_channel_token_ids(self) -> dict[str, int | list[int] | None]:
-        """Get channel name token IDs."""
+        """Get channel name token IDs for final channel variants."""
         return {
             "final": self._encode_single_token("final"),
-            "analysis": self._encode_single_token("analysis"),
             " final": self._encode_single_token(" final"),
-            " analysis": self._encode_single_token(" analysis"),
-            "commentary": self._encode_tokens("commentary"),
+            "finally": self._encode_single_token("finally"),
         }
 
     def _encode_single_token(self, text: str) -> int | None:
@@ -82,15 +78,15 @@ class OpenAIToolParser(ToolParser):
 
     def _build_bad_words_sequences(self) -> list[list[int]]:
         """
-        Build bad_words token sequences to block non-tool-call paths.
+        Build bad_words token sequences to block the final channel only.
 
-        Blocks these sequences (all share the same prefix pattern):
+        Blocks these sequences to prevent direct text responses:
         - <|end|><|start|>assistant<|channel|>final
-        - <|end|><|start|>assistant<|channel|>analysis
-        - <|end|><|start|>assistant<|channel|>commentary<|message|>
-          (commentary without recipient = preamble only, not a tool call)
+        - <|end|><|start|>assistant<|channel|> final  (leading space variant)
+        - <|end|><|start|>assistant<|channel|>finally  (tokenizer edge case)
 
-        This forces the model to use commentary channel with recipient (tool call).
+        Analysis and commentary channels remain unblocked, allowing the model
+        to reason freely and generate preambles before tool calls.
         """
         bad_sequences: list[list[int]] = []
 
@@ -98,7 +94,6 @@ class OpenAIToolParser(ToolParser):
         start_id = self._harmony_token_ids.get("start")
         assistant_id = self._harmony_token_ids.get("assistant")
         channel_id = self._harmony_token_ids.get("channel")
-        message_id = self._harmony_token_ids.get("message")
 
         # Validate required tokens exist
         if (
@@ -116,20 +111,13 @@ class OpenAIToolParser(ToolParser):
         # Common prefix: <|end|><|start|>assistant<|channel|>
         prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
 
-        # Block final/analysis channels
-        for channel_key in ["final", "analysis", " final", " analysis"]:
+        # Block final channel variants only
+        for channel_key in ["final", " final", "finally"]:
             channel_token = self._channel_token_ids.get(channel_key)
             if isinstance(channel_token, int):
                 seq = prefix + [channel_token]
                 bad_sequences.append(seq)
-                logger.debug("Blocking %s channel: %s", channel_key, seq)
-
-        # Block commentary without recipient (preamble only, not a tool call)
-        commentary_tokens = self._channel_token_ids.get("commentary")
-        if isinstance(commentary_tokens, list) and message_id is not None:
-            seq = prefix + commentary_tokens + [message_id]
-            bad_sequences.append(seq)
-            logger.debug("Blocking commentary without recipient: %s", seq)
+                logger.debug("Blocking %s token: %s", channel_key, seq)
 
         return bad_sequences
 
