@@ -52,13 +52,56 @@ class OpenAIToolParser(ToolParser):
             "assistant": self._encode_single_token("assistant"),
         }
 
-    def _get_channel_token_ids(self) -> dict[str, int | list[int] | None]:
-        """Get channel name token IDs for final channel variants."""
-        return {
-            "final": self._encode_single_token("final"),
-            " final": self._encode_single_token(" final"),
-            "finally": self._encode_single_token("finally"),
-        }
+    # All "final"-related tokens found via embedding similarity analysis.
+    # These tokens are close to "final" in the model's embedding space and
+    # could potentially be generated instead of the exact "final" token
+    # after <|channel|>.
+    _FINAL_VARIANTS: list[str] = [
+        # Exact and case variants
+        "final",
+        " final",
+        "Final",
+        " Final",
+        "FINAL",
+        " FINAL",
+        # Prefix-attached variants
+        "_final",
+        "_Final",
+        "_FINAL",
+        ".final",
+        ".Final",
+        "(final",
+        "-final",
+        # Indented variant
+        "    final",
+        # Derived words that start with "final"
+        "finally",
+        " finally",
+        "finalize",
+        "Finalize",
+        " finalize",
+        " finalized",
+        " finale",
+        " Finale",
+        " finals",
+        " Finals",
+        " finalist",
+        " finalists",
+        " finais",
+        # Partial match
+        "INAL",
+        # Non-English variants
+        " finalement",
+        " finalizar",
+        " finalidade",
+    ]
+
+    def _get_channel_token_ids(self) -> dict[str, int | None]:
+        """Get token IDs for all final channel variants."""
+        result: dict[str, int | None] = {}
+        for variant in self._FINAL_VARIANTS:
+            result[variant] = self._encode_single_token(variant)
+        return result
 
     def _encode_single_token(self, text: str) -> int | None:
         """Encode text and return token ID if it's a single token."""
@@ -78,12 +121,11 @@ class OpenAIToolParser(ToolParser):
 
     def _build_bad_words_sequences(self) -> list[list[int]]:
         """
-        Build bad_words token sequences to block the final channel only.
+        Build bad_words token sequences to block the final channel.
 
-        Blocks these sequences to prevent direct text responses:
-        - <|end|><|start|>assistant<|channel|>final
-        - <|end|><|start|>assistant<|channel|> final  (leading space variant)
-        - <|end|><|start|>assistant<|channel|>finally  (tokenizer edge case)
+        Blocks all "final"-related token variants after the channel marker
+        prefix <|end|><|start|>assistant<|channel|>. Variants were identified
+        via embedding similarity analysis on the model's token embedding space.
 
         Analysis and commentary channels remain unblocked, allowing the model
         to reason freely and generate preambles before tool calls.
@@ -111,13 +153,17 @@ class OpenAIToolParser(ToolParser):
         # Common prefix: <|end|><|start|>assistant<|channel|>
         prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
 
-        # Block final channel variants only
-        for channel_key in ["final", " final", "finally"]:
-            channel_token = self._channel_token_ids.get(channel_key)
-            if isinstance(channel_token, int):
-                seq = prefix + [channel_token]
+        # Block all final-related token variants
+        for variant, token_id in self._channel_token_ids.items():
+            if isinstance(token_id, int):
+                seq = prefix + [token_id]
                 bad_sequences.append(seq)
-                logger.debug("Blocking %s token: %s", channel_key, seq)
+                logger.debug("Blocking '%s' (id=%d): %s", variant, token_id, seq)
+
+        logger.info(
+            "Built %d bad_words sequences for tool_choice=required",
+            len(bad_sequences),
+        )
 
         return bad_sequences
 
