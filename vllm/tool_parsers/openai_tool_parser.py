@@ -34,6 +34,7 @@ class OpenAIToolParser(ToolParser):
     HARMONY_END_TOKEN = "<|end|>"
     HARMONY_START_TOKEN = "<|start|>"
     HARMONY_CHANNEL_TOKEN = "<|channel|>"
+    HARMONY_RETURN_TOKEN = "<|return|>"
 
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
@@ -49,6 +50,7 @@ class OpenAIToolParser(ToolParser):
             "end": vocab.get(self.HARMONY_END_TOKEN),
             "start": vocab.get(self.HARMONY_START_TOKEN),
             "channel": vocab.get(self.HARMONY_CHANNEL_TOKEN),
+            "return": vocab.get(self.HARMONY_RETURN_TOKEN),
             "assistant": self._encode_single_token("assistant"),
         }
 
@@ -123,9 +125,11 @@ class OpenAIToolParser(ToolParser):
         """
         Build bad_words token sequences to block the final channel.
 
-        Blocks all "final"-related token variants after the channel marker
-        prefix <|end|><|start|>assistant<|channel|>. Variants were identified
-        via embedding similarity analysis on the model's token embedding space.
+        Two layers of defense:
+        1. Block all "final"-related token variants after <|channel|> prefix
+           (prevents entering the final channel)
+        2. Block <|return|> globally as a safety net
+           (prevents completing a text response even if final channel is entered)
 
         Analysis and commentary channels remain unblocked, allowing the model
         to reason freely and generate preambles before tool calls.
@@ -136,6 +140,7 @@ class OpenAIToolParser(ToolParser):
         start_id = self._harmony_token_ids.get("start")
         assistant_id = self._harmony_token_ids.get("assistant")
         channel_id = self._harmony_token_ids.get("channel")
+        return_id = self._harmony_token_ids.get("return")
 
         # Validate required tokens exist
         if (
@@ -150,15 +155,22 @@ class OpenAIToolParser(ToolParser):
             )
             return []
 
-        # Common prefix: <|end|><|start|>assistant<|channel|>
+        # Layer 1: Block final channel variants after prefix
+        # <|end|><|start|>assistant<|channel|> + final variant
         prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
-
-        # Block all final-related token variants
         for variant, token_id in self._channel_token_ids.items():
             if isinstance(token_id, int):
                 seq = prefix + [token_id]
                 bad_sequences.append(seq)
                 logger.debug("Blocking '%s' (id=%d): %s", variant, token_id, seq)
+
+        # Layer 2: Block <|return|> globally (safety net)
+        # <|return|> is a special token with no variants, so this is robust.
+        # If the model somehow enters the final channel despite Layer 1,
+        # it cannot emit <|return|> to complete the response.
+        if return_id is not None:
+            bad_sequences.append([return_id])
+            logger.debug("Blocking <|return|> globally (id=%d)", return_id)
 
         logger.info(
             "Built %d bad_words sequences for tool_choice=required",
