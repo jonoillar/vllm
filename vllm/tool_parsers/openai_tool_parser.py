@@ -30,105 +30,48 @@ class OpenAIToolParser(ToolParser):
     to block non-tool-call generation paths.
     """
 
-    # Harmony special token names
-    HARMONY_END_TOKEN = "<|end|>"
-    HARMONY_START_TOKEN = "<|start|>"
-    HARMONY_CHANNEL_TOKEN = "<|channel|>"
-    HARMONY_RETURN_TOKEN = "<|return|>"
+    # Token sequences to block when tool_choice="required".
+    # Each inner list is a sequence of token strings to resolve and block.
+    # Analysis and commentary channels remain unblocked, allowing the model
+    # to reason freely and generate preambles before tool calls.
+    BLOCKED_PATTERNS: list[list[str]] = [
+        # Block final channel variants
+        ["<|end|>", "<|start|>", "assistant", "<|channel|>", "final"],
+        ["<|end|>", "<|start|>", "assistant", "<|channel|>", " final"],
+        ["<|end|>", "<|start|>", "assistant", "<|channel|>", "finally"],
+        # Block <|return|> globally — prevents completing any text response.
+        # This is a special token with no variants, so no edge cases.
+        ["<|return|>"],
+    ]
 
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
-        # Cache special token IDs from vocab (dynamic lookup, not hardcoded)
-        self._harmony_token_ids = self._get_harmony_token_ids()
-        # Cache channel name token IDs
-        self._channel_token_ids = self._get_channel_token_ids()
 
-    def _get_harmony_token_ids(self) -> dict[str, int | None]:
-        """Get Harmony special token IDs from vocabulary."""
-        vocab = self.vocab
-        return {
-            "end": vocab.get(self.HARMONY_END_TOKEN),
-            "start": vocab.get(self.HARMONY_START_TOKEN),
-            "channel": vocab.get(self.HARMONY_CHANNEL_TOKEN),
-            "return": vocab.get(self.HARMONY_RETURN_TOKEN),
-            "assistant": self._encode_single_token("assistant"),
-        }
-
-    def _get_channel_token_ids(self) -> dict[str, int | None]:
-        """Get channel name token IDs for final channel variants."""
-        return {
-            "final": self._encode_single_token("final"),
-            " final": self._encode_single_token(" final"),
-            "finally": self._encode_single_token("finally"),
-        }
-
-    def _encode_single_token(self, text: str) -> int | None:
-        """Encode text and return token ID if it's a single token."""
+    def _resolve_token(self, text: str) -> int | None:
+        """Resolve a token string to its ID (special token or encoded)."""
+        token_id = self.vocab.get(text)
+        if token_id is not None:
+            return token_id
         try:
             ids = self.model_tokenizer.encode(text, add_special_tokens=False)
             return ids[0] if len(ids) == 1 else None
         except Exception:
             return None
 
-    def _encode_tokens(self, text: str) -> list[int] | None:
-        """Encode text and return all token IDs."""
-        try:
-            ids = self.model_tokenizer.encode(text, add_special_tokens=False)
-            return ids if ids else None
-        except Exception:
-            return None
-
     def _build_bad_words_sequences(self) -> list[list[int]]:
-        """
-        Build bad_words token sequences to block the final channel.
-
-        Blocks these sequences to prevent direct text responses:
-        - <|end|><|start|>assistant<|channel|>final
-        - <|end|><|start|>assistant<|channel|> final  (leading space variant)
-        - <|end|><|start|>assistant<|channel|>finally  (tokenizer edge case)
-        - <|return|>  (global block — prevents completing any text response)
-
-        Analysis and commentary channels remain unblocked, allowing the model
-        to reason freely and generate preambles before tool calls.
-        """
+        """Build bad_words token ID sequences from BLOCKED_PATTERNS."""
         bad_sequences: list[list[int]] = []
-
-        end_id = self._harmony_token_ids.get("end")
-        start_id = self._harmony_token_ids.get("start")
-        assistant_id = self._harmony_token_ids.get("assistant")
-        channel_id = self._harmony_token_ids.get("channel")
-
-        # Validate required tokens exist
-        if (
-            end_id is None
-            or start_id is None
-            or assistant_id is None
-            or channel_id is None
-        ):
-            logger.warning(
-                "Missing Harmony special tokens in vocabulary. "
-                "tool_choice='required' may not work correctly."
-            )
-            return []
-
-        # Common prefix: <|end|><|start|>assistant<|channel|>
-        prefix: list[int] = [end_id, start_id, assistant_id, channel_id]
-
-        # Block final channel variants
-        for channel_key in ["final", " final", "finally"]:
-            channel_token = self._channel_token_ids.get(channel_key)
-            if isinstance(channel_token, int):
-                seq = prefix + [channel_token]
-                bad_sequences.append(seq)
-                logger.debug("Blocking %s token: %s", channel_key, seq)
-
-        # Block <|return|> globally as safety net.
-        # This is a special token with no variants, so no edge cases.
-        return_id = self._harmony_token_ids.get("return")
-        if return_id is not None:
-            bad_sequences.append([return_id])
-            logger.debug("Blocking <|return|> globally (id=%d)", return_id)
-
+        for pattern in self.BLOCKED_PATTERNS:
+            ids = [self._resolve_token(t) for t in pattern]
+            if all(id is not None for id in ids):
+                bad_sequences.append(ids)  # type: ignore[arg-type]
+                logger.debug("Blocking pattern: %s -> %s", pattern, ids)
+            else:
+                logger.warning(
+                    "Could not resolve all tokens in pattern %s, skipping. "
+                    "tool_choice='required' may not work correctly.",
+                    pattern,
+                )
         return bad_sequences
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
